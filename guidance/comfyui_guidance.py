@@ -2,7 +2,17 @@ import os
 import random
 import sys
 from typing import Sequence, Mapping, Any, Union
+
+from dataclasses import dataclass, field
+from typing import List
+
+import numpy as np
+import threestudio
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from threestudio.utils.base import BaseObject
+from threestudio.utils.typing import *
 
 
 def get_value_at_index(obj: Union[Sequence, Mapping], index: int) -> Any:
@@ -59,10 +69,12 @@ def add_comfyui_directory_to_sys_path() -> None:
     """
     Add 'ComfyUI' to the sys.path
     """
-    comfyui_path = find_path("ComfyUI")
+    comfyui_path = "custom/threestudio-comfyui/ComfyUI"
     if comfyui_path is not None and os.path.isdir(comfyui_path):
         sys.path.append(comfyui_path)
         print(f"'{comfyui_path}' added to sys.path")
+    else:
+        raise RuntimeError("Could not find the ComfyUI directory.")
 
 
 def add_extra_model_paths() -> None:
@@ -80,11 +92,12 @@ def add_extra_model_paths() -> None:
 
 
 add_comfyui_directory_to_sys_path()
-add_extra_model_paths()
+# add_extra_model_paths()
 
 from ..ComfyUI.nodes import (
     EmptyLatentImage,
     VAEDecode,
+    VAEEncode,
     SaveImage,
     CheckpointLoaderSimple,
     CLIPTextEncode,
@@ -92,49 +105,105 @@ from ..ComfyUI.nodes import (
     NODE_CLASS_MAPPINGS,
 )
 
+@threestudio.register("comfyui-guidance")
+class ComfyUIGUidance(BaseObject):
+    @dataclass
+    class Config(BaseObject.Config):
+        pretrained_model_name_or_path: str = ""
 
-def main():
-    with torch.inference_mode():
-        checkpointloadersimple = CheckpointLoaderSimple()
-        checkpointloadersimple_4 = checkpointloadersimple.load_checkpoint(
+    cfg: Config
+
+    def configure(self) -> None:
+
+        self.checkpointloadersimple = CheckpointLoaderSimple()
+        self.checkpointloadersimple_4 = self.checkpointloadersimple.load_checkpoint(
             ckpt_name="v2-1_768-ema-pruned.safetensors"
         )
+    
+    def densify(self, factor=2):
+        pass
 
-        emptylatentimage = EmptyLatentImage()
-        emptylatentimage_5 = emptylatentimage.generate(
-            width=512, height=512, batch_size=1
+    def __call__(
+        self,
+        rgb: Float[Tensor, "B H W C"],
+        prompt_utils,
+        elevation: Float[Tensor, "B"],
+        azimuth: Float[Tensor, "B"],
+        camera_distances: Float[Tensor, "B"],
+        rgb_as_latents=False,
+        guidance_eval=False,
+        **kwargs,
+    ):
+        rgb_BCHW = rgb.permute(0, 3, 1, 2)
+        rgb_BCHW_512 = F.interpolate(
+            rgb_BCHW, (512, 512), mode="bilinear", align_corners=False
         )
+        img_input = rgb_BCHW_512.permute(0, 2, 3, 1)
 
-        cliptextencode = CLIPTextEncode()
-        cliptextencode_6 = cliptextencode.encode(
-            text="beautiful scenery nature glass bottle landscape, , purple galaxy bottle,",
-            clip=get_value_at_index(checkpointloadersimple_4, 1),
-        )
+        with torch.no_grad():
+            # emptylatentimage = EmptyLatentImage()
+            # emptylatentimage_5 = emptylatentimage.generate(
+            #     width=512, height=512, batch_size=1
+            # )
+            
+            vaeencode = VAEEncode()
+            emptylatentimage_5 = vaeencode.encode(
+                pixels=img_input,
+                vae=get_value_at_index(self.checkpointloadersimple_4, 2),
+            )
+            
+            cliptextencode = CLIPTextEncode()
+            cliptextencode_6 = cliptextencode.encode(
+                text="a delicious hamburger",
+                clip=get_value_at_index(self.checkpointloadersimple_4, 1),
+            )
 
-        cliptextencode_7 = cliptextencode.encode(
-            text="text, watermark", clip=get_value_at_index(checkpointloadersimple_4, 1)
-        )
+            cliptextencode_7 = cliptextencode.encode(
+                text="text, watermark", clip=get_value_at_index(self.checkpointloadersimple_4, 1)
+            )
 
-        ksampler = KSampler()
-        vaedecode = VAEDecode()
-        saveimage = SaveImage()
+            ksampler = KSampler()
 
-        ksampler_3 = ksampler.sample(
-            seed=random.randint(1, 2**64),
-            steps=20,
-            cfg=8,
-            sampler_name="euler",
-            scheduler="normal",
-            denoise=1,
-            model=get_value_at_index(checkpointloadersimple_4, 0),
-            positive=get_value_at_index(cliptextencode_6, 0),
-            negative=get_value_at_index(cliptextencode_7, 0),
-            latent_image=get_value_at_index(emptylatentimage_5, 0),
-        )
+            ksampler_3 = ksampler.sample(
+                seed=random.randint(1, 2**64),
+                steps=1,
+                cfg=100,
+                sampler_name="euler",
+                scheduler="normal",
+                denoise=random.randint(20, 980) / 1000,
+                model=get_value_at_index(self.checkpointloadersimple_4, 0),
+                positive=get_value_at_index(cliptextencode_6, 0),
+                negative=get_value_at_index(cliptextencode_7, 0),
+                latent_image=get_value_at_index(emptylatentimage_5, 0),
+            )
+            # ksampler_3 = ksampler.sample(
+            #     seed=random.randint(1, 2**64),
+            #     steps=20,
+            #     cfg=8,
+            #     sampler_name="euler",
+            #     scheduler="normal",
+            #     denoise=1.0,
+            #     model=get_value_at_index(self.checkpointloadersimple_4, 0),
+            #     positive=get_value_at_index(cliptextencode_6, 0),
+            #     negative=get_value_at_index(cliptextencode_7, 0),
+            #     latent_image=get_value_at_index(emptylatentimage_5, 0),
+            # )
 
-        latent = get_value_at_index(ksampler_3, 0)['samples']
-        print(latent.shape)
+            pred_latents = get_value_at_index(ksampler_3, 0)['samples']
 
+            vaedecode = VAEDecode()
+            vaedecode_8 = vaedecode.decode(
+                samples=get_value_at_index(ksampler_3, 0),
+                vae=get_value_at_index(self.checkpointloadersimple_4, 2),
+            )
+            # saveimage = SaveImage()
 
-if __name__ == "__main__":
-    main()
+            # saveimage_9 = saveimage.save_images(
+            #     filename_prefix="threestudio_test", images=get_value_at_index(vaedecode_8, 0)
+            # )
+        pred_image = get_value_at_index(vaedecode_8, 0).detach().to(img_input.device)
+        loss_sds = 0.5 * F.mse_loss(img_input, pred_image, reduction="sum")
+
+        return {
+            "loss_sds": loss_sds,
+        }
